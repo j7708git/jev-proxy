@@ -42,6 +42,7 @@ func (c *Client) Evaluate(ctx context.Context, req any) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		r.Header.Set("User-Agent", "jev-proxy/score") // Go's default UA trips some providers' bot filters
 		r.Header.Set("Authorization", "Bearer "+c.APIKey)
 		r.Header.Set("Content-Type", "application/json")
 		resp, err := c.HTTP.Do(r)

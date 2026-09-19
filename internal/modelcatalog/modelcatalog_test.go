@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,10 @@ func listSrv(t *testing.T, ids ...string) (*httptest.Server, *atomic.Int64) {
 		}
 		if r.Header.Get("Authorization") != "Bearer k" {
 			w.WriteHeader(401)
+			return
+		}
+		if ua := r.Header.Get("User-Agent"); !strings.Contains(ua, "jev-proxy") {
+			w.WriteHeader(403) // like Nous' edge: Go's default UA is bot-blocked
 			return
 		}
 		var data []map[string]any

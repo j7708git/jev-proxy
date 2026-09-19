@@ -25,6 +25,10 @@ type Entry struct {
 	Provider string
 }
 
+// userAgent is sent on proxy-originated calls (model listing). Never rely
+// on Go's default UA: it trips bot filters (Nous Portal answers 403).
+const userAgent = "jev-proxy/model-catalog"
+
 // Catalog caches merged provider listings with a TTL.
 type Catalog struct {
 	cfg    *config.Config
@@ -148,6 +152,9 @@ func (c *Catalog) fetch(ctx context.Context, name string, p *config.Provider) ([
 	if err != nil {
 		return nil, &listError{name, err.Error()}
 	}
+	// The Go default UA ("Go-http-client/2.0") is bot-blocked by some
+	// providers' edge rules — Nous answers 403. Identify ourselves.
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Authorization", "Bearer "+key)
 	resp, err := c.client.Do(req)
 	if err != nil {

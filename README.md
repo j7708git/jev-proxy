@@ -45,6 +45,73 @@ Agent 端：`base_url` 指向 `http://localhost:8080/v1`，`Authorization` 填 `
 - `JEV_CLIENT_KEY` 有值＝啟用門鎖：`/v1/*` 都要帶它（常數時間比對），防止本機其他程式或區網白嫖金庫；預設 `listen: 127.0.0.1:8080` 只綁本機
 - 某家 key 沒填：開機警告、其他家照常、打到那家才報錯（缺哪些會印在啟動日誌）
 
+## 客戶端接法（dsh / Hermes）
+
+共通前提：**先啟動 jev-proxy**；agent 端 `Authorization` 填 `JEV_CLIENT_KEY` 的值（門鎖沒開則隨意填非空字串——pi-ai 的 OpenAI 協定不允許零憑證，佔位即可）；模型名**用 `GET /v1/models` 清單上的 namespace 名**（`openrouter/…`、`nous/…`，或 `deepseek-chat` 這種被 routes 直收的）。
+
+### dsh（本 harness）
+
+`~\.dsh\settings.yaml` 的 `llm-pi-ai.providers` 加一條自訂 route（pi-ai 內建目錄外的 route 必填 `api`、`baseURL`、非空 `models`）：
+
+```yaml
+llm-pi-ai:
+  providers:
+    jev-gateway:
+      displayName: "Jev Gateway (scored)"
+      api: openai-completions          # 必填：OpenAI chat 協定
+      baseURL: http://127.0.0.1:8080/v1
+      apiKeyEnv: JEV_CLIENT_KEY        # 憑證引用：先 credentials 儲存區，再環境變數
+      models:
+        - id: openrouter/deepseek/deepseek-v4-flash
+          name: "DeepSeek V4 Flash (經 OpenRouter，含評分)"
+        - id: nous/deepseek/deepseek-r1-0528
+          name: "DeepSeek R1 0528 (Nous 直連，含評分)"
+        - id: deepseek-chat
+          name: "DeepSeek Chat (官方直連，含評分)"
+```
+
+金鑰二擇一：① Web **Settings → Models** 頁在該 provider 的 API key 欄貼值——存進 credentials、`settings.yaml` 不落明文，引用名即 `JEV_CLIENT_KEY`；② 系統環境變數 `setx JEV_CLIENT_KEY "<值>"` 後**重開 dsh**（setx 對已啟動進程無效）。`models` 照 `/v1/models` 的輸出增刪。踩過的人會遇到的錯碼：`MISSING_CREDENTIAL`＝引用解析為空（key 沒存/環境沒生效）、`UNKNOWN_MODEL`＝models 清單沒列那顆。
+
+### Hermes
+
+`%LOCALAPPDATA%\hermes\config.yaml` 的 `providers:` 加一條（與你現有的 `openrouter_custom` 同格式）：
+
+```yaml
+providers:
+  jev:
+    name: jev
+    base_url: http://127.0.0.1:8080/v1
+    key_env: JEV_CLIENT_KEY
+    discover_models: true      # 預設即 true；直接抓 gateway 的 namespace 合併清單
+    models:
+      openrouter/deepseek/deepseek-v4-flash: {}   # 最低兜底，discover 會補齊其餘
+```
+
+同一個值放進 Hermes 自己的 `.env`（與 `config.yaml` 同目錄，`$HERMES_HOME\.env`；`key_env` 解析優先讀它）：
+
+```
+JEV_CLIENT_KEY=<與 jev-proxy\.env 裡同一個值>
+```
+
+要預設走閘道就把頂部 `model:` 的 `provider: jev`、`default:` 填清單上的 namespace 名，或直接在 UI 的模型選單換。
+
+### 接完驗收（兩家通用）
+
+```sh
+# 1) 清單與門鎖
+curl -H "Authorization: Bearer <JEV_CLIENT_KEY>" http://127.0.0.1:8080/v1/models
+# 2) 一輪對話看路由與評分
+curl -N -H "Authorization: Bearer <JEV_CLIENT_KEY>" -H "Content-Type: application/json" \
+  -d '{"model":"openrouter/deepseek/deepseek-v4-flash","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+  http://127.0.0.1:8080/v1/chat/completions -D -
+#    回應標頭應有 X-Jev-Provider: openrouter；數秒後 scores-YYYY-MM.jsonl 多一筆
+#    {"provider":"openrouter","status":"ok",weighted…}
+# 3) 總量
+curl http://127.0.0.1:8080/metrics   # provider_requests_<name>_total 隨對話递增
+```
+
+Agent 側若連不上：先確認 proxy 進程活著（connection refused＝沒啟動/埠错）、401＝兩邊 `JEV_CLIENT_KEY` 不同值、模型 404 但清單有＝名字漏了 namespace 前綴。
+
 ## 行為
 
 | 情境 | 行為 |

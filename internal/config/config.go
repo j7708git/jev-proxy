@@ -7,10 +7,17 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"jev-proxy/internal/route"
 )
 
-// Config is the full proxy configuration. Every field has a workable default
-// except Upstream, which must point at an OpenAI-compatible chat endpoint.
+// Config covers both operating modes:
+//
+//   - legacy passthrough: set `upstream` only. The client's Authorization
+//     rides through untouched; nothing else changes.
+//   - gateway: set `providers` (+ `routes`/`default`). jev-proxy becomes the
+//     key vault: it routes by model name and injects each provider's key
+//     from the environment (.env supported).
 type Config struct {
 	Listen   string  `yaml:"listen"`
 	Upstream string  `yaml:"upstream"`
@@ -18,6 +25,45 @@ type Config struct {
 	Scoring  Scoring `yaml:"scoring"`
 	Queue    Queue   `yaml:"queue"`
 	Log      Log     `yaml:"log"`
+
+	Providers map[string]*Provider `yaml:"providers"`
+	Routes    []Route              `yaml:"routes"`
+	Default   string               `yaml:"default"`
+	Auth      Auth                 `yaml:"auth"`
+
+	// MissingKeys lists provider api_key_env names absent from the
+	// environment at startup. Requests to those providers fail at call
+	// time; surfacing them early is a startup warning, not fatal.
+	MissingKeys []string `yaml:"-"`
+}
+
+// Provider is one upstream LLM API.
+type Provider struct {
+	// Endpoint is the API base, e.g. https://api.deepseek.com/v1.
+	// A URL already ending in /chat/completions is used verbatim.
+	Endpoint  string `yaml:"endpoint"`
+	APIKeyEnv string `yaml:"api_key_env"` // set => proxy injects "Bearer <key>"
+	// ModelsPath overrides the models listing path (default "/models").
+	ModelsPath string `yaml:"models_path"`
+	// IncludeModels optionally filters the /v1/models view (glob list).
+	IncludeModels []string `yaml:"include_models"`
+
+	// legacy marks the synthesized single-upstream provider: it never
+	// injects auth and keeps the historical /v1/chat/completions append.
+	legacy bool
+}
+
+// Route is one ordered name-based rule (see package route).
+type Route struct {
+	Match    string `yaml:"match"`
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"` // optional forward-time rename
+}
+
+// Auth optionally locks the gateway: when ClientKeyEnv resolves to a
+// non-empty value, every /v1 request must present it as its Bearer token.
+type Auth struct {
+	ClientKeyEnv string `yaml:"client_key_env"`
 }
 
 type Jev struct {
@@ -53,7 +99,7 @@ type Log struct {
 	Path string `yaml:"path"`
 }
 
-// Load reads the YAML file at path and applies defaults for absent fields.
+// Load reads the YAML file at path, applies defaults, and validates.
 func Load(path string) (*Config, error) {
 	cfg := &Config{}
 	if path != "" {
@@ -66,17 +112,18 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	cfg.applyDefaults()
-	if cfg.Upstream == "" {
-		return nil, fmt.Errorf("config: upstream is required (OpenAI-compatible chat completions URL)")
+	if err := cfg.normalize(); err != nil {
+		return nil, err
 	}
 	if !cfg.Jev.hasAPIKey() {
 		return nil, fmt.Errorf("config: set %s in the environment (jev.api_key_env)", cfg.Jev.APIKeyEnv)
 	}
+	cfg.MissingKeys = cfg.checkProviderKeys()
 	return cfg, nil
 }
 
 func (c *Config) applyDefaults() {
-	setStr(&c.Listen, ":8080")
+	setStr(&c.Listen, "127.0.0.1:8080")
 	switch c.Jev.Provider {
 	case "", "openrouter":
 		c.Jev.Provider = "openrouter"
@@ -131,6 +178,105 @@ func (c *Config) applyDefaults() {
 		c.Queue.Workers = 2
 	}
 	setStr(&c.Log.Path, "scores.jsonl")
+}
+
+// normalize wires the two modes apart: no providers → a single synthesized
+// legacy passthrough provider; providers set → validate names/defaults.
+func (c *Config) normalize() error {
+	if len(c.Providers) == 0 {
+		if c.Upstream == "" {
+			return fmt.Errorf("config: set either `upstream` (passthrough) or `providers` (gateway)")
+		}
+		if len(c.Routes) > 0 || c.Default != "" {
+			return fmt.Errorf("config: routes/default require providers")
+		}
+		c.Providers = map[string]*Provider{"upstream": {Endpoint: c.Upstream, legacy: true}}
+		c.Default = "upstream"
+		return nil
+	}
+	if c.Upstream != "" {
+		return fmt.Errorf("config: set `upstream` OR `providers`, not both")
+	}
+	for name, p := range c.Providers {
+		if name == "" || p == nil || p.Endpoint == "" {
+			return fmt.Errorf("config: provider %q needs an endpoint", name)
+		}
+		if p.ModelsPath == "" {
+			p.ModelsPath = "/models"
+		}
+	}
+	for _, r := range c.Routes {
+		if _, ok := c.Providers[r.Provider]; !ok {
+			return fmt.Errorf("config: route %q targets unknown provider %q", r.Match, r.Provider)
+		}
+	}
+	if c.Default == "" {
+		if len(c.Providers) == 1 {
+			for name := range c.Providers {
+				c.Default = name
+			}
+		} else {
+			return fmt.Errorf("config: `default` provider is required with multiple providers")
+		}
+	} else if _, ok := c.Providers[c.Default]; !ok {
+		return fmt.Errorf("config: default provider %q not registered", c.Default)
+	}
+	return nil
+}
+
+// IsGateway reports provider-routing mode (vs legacy passthrough).
+func (c *Config) IsGateway() bool {
+	return !(len(c.Providers) == 1 && c.Providers["upstream"] != nil && c.Providers["upstream"].legacy)
+}
+
+// Resolver builds the model-name router from config.
+func (c *Config) Resolver() *route.Resolver {
+	names := make(map[string]bool, len(c.Providers))
+	for n := range c.Providers {
+		names[n] = true
+	}
+	rules := make([]route.Rule, 0, len(c.Routes))
+	for _, r := range c.Routes {
+		rules = append(rules, route.Rule{Match: r.Match, Provider: r.Provider, Model: r.Model})
+	}
+	return route.New(rules, names, c.Default)
+}
+
+// APIKey resolves a provider's key from the environment at call time, so a
+// rotated key is picked up without restarting. Empty means not configured.
+func (p *Provider) APIKey() string {
+	if p.APIKeyEnv == "" {
+		return ""
+	}
+	return os.Getenv(p.APIKeyEnv)
+}
+
+func (p *Provider) InjectsAuth() bool { return !p.legacy && p.APIKeyEnv != "" }
+
+// Legacy reports the synthesized single-upstream provider (no auth injection,
+// historical /v1 path append).
+func (p *Provider) Legacy() bool { return p.legacy }
+
+// Normalize makes a bare Config usable: without a Load/parse pass (e.g. test
+// structs) an `upstream`-only config still gets its legacy provider. Safe to
+// call repeatedly.
+func (c *Config) Normalize() error { return c.normalize() }
+
+// ClientKey resolves the agent-side gate token; "" disables auth entirely.
+func (a Auth) ClientKey() string {
+	if a.ClientKeyEnv == "" {
+		return ""
+	}
+	return os.Getenv(a.ClientKeyEnv)
+}
+
+func (c *Config) checkProviderKeys() (missing []string) {
+	for name, p := range c.Providers {
+		if p.InjectsAuth() && p.APIKey() == "" {
+			missing = append(missing, name+":"+p.APIKeyEnv)
+		}
+	}
+	return missing
 }
 
 func setStr(p *string, v string) {

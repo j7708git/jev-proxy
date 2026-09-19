@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net/http"
+	"sort"
 )
 
 // metrics renders cumulative counters and the rolling Jev latency window as
@@ -13,6 +14,7 @@ func (h *Handler) metrics(w http.ResponseWriter, _ *http.Request) {
 	p50, p95 := m.LatencyMS()
 	lines := []string{
 		fmt.Sprintf("requests_total %d", m.RequestsTotal.Load()),
+		fmt.Sprintf("route_error_total %d", m.RouteErrorTotal.Load()),
 		fmt.Sprintf("scored_total %d", m.ScoredTotal.Load()),
 		fmt.Sprintf("skipped_total %d", m.SkippedTotal.Load()),
 		fmt.Sprintf("error_total %d", m.ErrorTotal.Load()),
@@ -27,6 +29,15 @@ func (h *Handler) metrics(w http.ResponseWriter, _ *http.Request) {
 	}
 	for lvl, name := range [4]string{"l0", "l1", "l2", "l3"} {
 		lines = append(lines, fmt.Sprintf("score_level_%s_total %d", name, m.ScoreLevelTotals[lvl].Load()))
+	}
+	provs := m.ProvidersSnapshot()
+	names := make([]string, 0, len(provs))
+	for p := range provs {
+		names = append(names, p)
+	}
+	sort.Strings(names)
+	for _, p := range names {
+		lines = append(lines, fmt.Sprintf("provider_requests_%s_total %d", p, provs[p]))
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	for _, l := range lines {

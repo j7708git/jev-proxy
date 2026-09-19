@@ -1,0 +1,20 @@
+# Gateway e2e (keyless): two fake provider upstreams (:9911 alpha, :9912 beta)
+# + fake Jev (:9913). Exercises routing, key injection, client gate, /v1/models.
+listen: 127.0.0.1:8083
+providers:
+  alpha: { endpoint: http://127.0.0.1:9911, api_key_env: E2E_ALPHA_KEY }
+  beta:  { endpoint: http://127.0.0.1:9912, api_key_env: E2E_BETA_KEY }
+routes:
+  - { match: "beta-*", provider: beta }
+default: alpha
+auth:
+  client_key_env: E2E_CLIENT_KEY
+jev:
+  provider: openrouter
+  endpoint: http://127.0.0.1:9913   # fake Jev; dummy key only has to exist
+  api_key_env: OPENROUTER_API_KEY
+scoring:
+  sample_rate: 1.0
+  min_confidence: 0.7
+queue: { cap: 100, workers: 1 }
+log: { path: ./scores-e2e-gw.jsonl }

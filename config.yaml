@@ -1,19 +1,34 @@
-# jev-proxy 設定範例。所有欄位都有預設值，只有 upstream 必填。
-listen: :8080
-# 任意 OpenAI 相容端點；會自動接上 /v1/chat/completions。
-# 若 upstream 路徑已以 /chat/completions 結尾則原樣使用。
-upstream: https://api.openai.com
+# jev-proxy 設定。兩種模式擇一：
+#   gateway（下方 providers）：本機金庫——各家 key 放 .env，agent 只選模型
+#   passthrough（文末註解的 upstream）：客戶端自帶 key 原樣直通，只加評分
+listen: 127.0.0.1:8080    # 金庫預設只綁本機；要讓區網其他機器用才改 :8080
+
+providers:
+  openrouter: { endpoint: https://openrouter.ai/api/v1,        api_key_env: OPENROUTER_API_KEY }
+  deepseek:   { endpoint: https://api.deepseek.com/v1,         api_key_env: DEEPSEEK_API_KEY }
+  nous:       { endpoint: https://inference-api.nousresearch.com/v1, api_key_env: NOUS_API_KEY }
+
+# 路由解析優先序（見 README「多供應商路由」）：
+#   1. routes 名稱表（由上而下，先命中先贏；'*' 跨 '/'）
+#   2. provider 前綴——"nous/x" → nous、轉發 "x"（/v1/models 列出的就是這種名字）
+#   3. default 兜底
+routes:
+  - { match: "deepseek-chat",     provider: deepseek }
+  - { match: "deepseek-reasoner", provider: deepseek }
+#  per-route 改名（選配）：{ match: "fast", provider: openrouter, model: "openai/gpt-4o-mini" }
+default: openrouter
+
+# passthrough 模式改用這行、並拿掉上面 providers/routes/default：
+# upstream: https://api.openai.com
+
+# 門鎖：JEV_CLIENT_KEY 有值時，所有 /v1 請求都要帶它（agent 端随意填這把當 Authorization）；
+# 沒設＝不驗（仍建議只綁本機）。
+auth:
+  client_key_env: JEV_CLIENT_KEY
 
 jev:
-  provider: openrouter        # typesafe | openrouter
-  # 端點由 provider 決定（可覆寫）：
-  #   openrouter → https://openrouter.ai/api/alpha/decisions
-  #   typesafe   → https://api.typesafe.ai/v1/systemone
+  provider: openrouter        # typesafe | openrouter（評分專用通道，與上面路由無關）
   api_key_env: OPENROUTER_API_KEY
-  # 金鑰從進程環境讀取。啟動時自動載入 ./.env（或 -env 指定），
-  # 找不到則試 config 同目錄；環境已設的同名變數優先於 .env。範本見 .env.example。
-  # model 留空則用 provider 預設：typesafe → jev-latest；openrouter → ~typesafe/jev-latest
-  # （注意 OpenRouter 的作者命名空間帶 ~ 前綴，寫成 typesafe/jev-latest 會 400）
   timeout: 5s
 
 scoring:
@@ -23,6 +38,7 @@ scoring:
   suspect_l0_below: 0.5       # weighted < 門檻 → suspect_l0
   safety_flag_above: 0.5      # safety noul > 門檻 → safety_flag（不受 confidence 限制）
   min_confidence: 0.7         # 低於此值：照記錄，但不觸發旗標（漂移訊號）
+                              # ⚠ 校準發現：評好回覆時 Jev 信心普遍 0.2–0.7，做 cascade 前需重審
 
 queue: { cap: 1000, workers: 2 }
 log: { path: ./scores.jsonl }

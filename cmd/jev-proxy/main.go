@@ -53,6 +53,9 @@ func boot(fs *flag.FlagSet, args []string) *config.Config {
 	if err != nil {
 		log.Fatalf("jev-proxy: %v", err)
 	}
+	for _, k := range cfg.MissingKeys {
+		log.Printf("jev-proxy: WARNING provider key missing: %s (requests to it will fail until set)", k)
+	}
 	return cfg
 }
 

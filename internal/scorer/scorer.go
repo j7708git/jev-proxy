@@ -50,6 +50,7 @@ func (m ChatMessage) Text() string {
 // Job is one unit of scoring work.
 type Job struct {
 	ResponseID    string // proxy-generated, the X-Jev-Request-Id key
+	Provider      string // gateway provider routed to ("" in legacy mode)
 	UpstreamID    string
 	UpstreamModel string
 	Messages      []ChatMessage
@@ -60,6 +61,7 @@ type Job struct {
 // concurrency-safe: workers and the proxy goroutines increment concurrently.
 type Metrics struct {
 	RequestsTotal      atomic.Int64
+	RouteErrorTotal    atomic.Int64 // gateway: no provider matched the model
 	ScoredTotal        atomic.Int64
 	SkippedTotal       atomic.Int64
 	ErrorTotal         atomic.Int64
@@ -72,8 +74,33 @@ type Metrics struct {
 	// ScoreLevelTotals buckets ok events by round(weighted): 0..3.
 	ScoreLevelTotals [4]atomic.Int64
 
-	mu        sync.Mutex
-	latencies []int64 // jev call latency, ms; rolling window
+	mu         sync.Mutex
+	latencies  []int64          // jev call latency, ms; rolling window
+	byProvider map[string]int64 // gateway: requests routed per provider
+}
+
+// AddProvider counts one routed request; legacy mode passes "".
+func (m *Metrics) AddProvider(name string) {
+	if name == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.byProvider == nil {
+		m.byProvider = map[string]int64{}
+	}
+	m.byProvider[name]++
+	m.mu.Unlock()
+}
+
+// ProvidersSnapshot copies the per-provider request counts.
+func (m *Metrics) ProvidersSnapshot() map[string]int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]int64, len(m.byProvider))
+	for k, v := range m.byProvider {
+		out[k] = v
+	}
+	return out
 }
 
 func (m *Metrics) addLatency(ms int64) {
@@ -141,7 +168,7 @@ func (s *Scorer) Submit(j Job) {
 	case s.queue <- j:
 		s.M.QueueDepth.Add(1)
 	default:
-		s.RecordSkipped(Job{ResponseID: j.ResponseID, UpstreamID: j.UpstreamID, UpstreamModel: j.UpstreamModel}, "queue_full")
+		s.RecordSkipped(Job{ResponseID: j.ResponseID, Provider: j.Provider, UpstreamID: j.UpstreamID, UpstreamModel: j.UpstreamModel}, "queue_full")
 	}
 }
 
@@ -150,7 +177,7 @@ func (s *Scorer) Submit(j Job) {
 func (s *Scorer) RecordSkipped(j Job, reason string) {
 	s.M.SkippedTotal.Add(1)
 	s.record(&store.Event{
-		TS: time.Now(), ResponseID: j.ResponseID, UpstreamID: j.UpstreamID,
+		TS: time.Now(), ResponseID: j.ResponseID, Provider: j.Provider, UpstreamID: j.UpstreamID,
 		UpstreamModel: j.UpstreamModel, RubricVersion: rubric.Version,
 		Status: "skipped", Reason: reason,
 	})
@@ -180,7 +207,7 @@ func (s *Scorer) run(ctx context.Context, j Job) *store.Event {
 	s.M.addLatency(lat)
 
 	ev := &store.Event{
-		TS: time.Now(), ResponseID: j.ResponseID, UpstreamID: j.UpstreamID,
+		TS: time.Now(), ResponseID: j.ResponseID, Provider: j.Provider, UpstreamID: j.UpstreamID,
 		UpstreamModel: j.UpstreamModel, RubricVersion: rubric.Version,
 		LatencyMS: lat, ReplySHA256: sha256Hex(j.Reply), Reply: j.Reply,
 	}

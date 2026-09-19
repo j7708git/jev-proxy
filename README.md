@@ -1,37 +1,49 @@
 # jev-proxy
 
-OpenAI 相容的 passthrough proxy：不做路由、不擋回覆、不修改任何內容，只在每輪最終文字回覆產出後，以對話上下文為依據非同步呼叫 Jev 打一個 0–3 的品質分（外加獨立的安全閘），寫入 JSONL。
+OpenAI 相容代理，兩種模式共用同一條評分支線——每輪最終文字回覆產出後，以對話上下文為依據非同步呼叫 Jev 打一個 0–3 的品質分（外加獨立的安全閘），寫入 JSONL。**任何模式下都不修改、不擋、不改寫回覆內容。**
 
-架構規劃與 rubric 定義見 `../docs/jev-score-proxy-plan.html`（rubric v1，四級 + 安全閘 + confidence 把手）。
+- **gateway（預設範例）**：多供應商金庫。各家 provider 的 key 集中放在本機 `.env`，agent 只需要「選模型」；proxy 按模型名路由到 openrouter / deepseek 官方 / nous…並注入對應金鑰
+- **passthrough（legacy）**：單一 `upstream`，客戶端自帶的 Authorization 原樣直通，proxy 只做評分遙測
+
+架構規劃與 rubric 定義見 `../docs/jev-score-proxy-plan.html`（四級 + 安全閘 + confidence 把手；其中「不做路由」的 v1 非目標已被 gateway 模式取代，金鑰管理見本檔）。
 
 ## 狀態
 
 - **M1 透明 passthrough**：完成 — ReverseProxy + 串流 buffer + request_id + JSONL 事件 + /healthz + /metrics
-- **M2 評分上線**：完成 — Jev adapter（TypeSafe + OpenRouter 兩 provider）、rubric v1、queue/worker、加權分計算、/v1/scores 查詢、skipped/error 事件
-  - 2026-09-19 修正兩處：OpenRouter 預設 model id 補上 `~` 命名空間（先前 `typesafe/jev-latest` 會 400）；串流模式補上 `sample_rate` 抽樣檢查（先前即使 rate=0 仍一律入隊評分）
-  - ✅ 真實 e2e 已通過（2026-09-19，OpenRouter）：串流直通 → 非同步評分 `status: ok`，`jev_model = typesafe/jev-1.13-20260917`，weighted 自算與 API 彙總交叉吻合（2.28 = 2.28）；該輪 confidence 0.68 < 0.7 → `low_confidence: true` 壓住旗標，正是漂移把手的 live 範例（見 `scores-e2e-2026-09.jsonl`）
-  - 2026-09-19 加專案 `.env`：啟動自動載入 `./.env`（或 `-env` 指定／config 同目錄），環境變數優先於檔案；金鑰不再依賴 shell
-  - 免 key 迴歸：`python e2e/fake_upstream.py` + `python e2e/fake_jev.py` + `./jev-proxy.exe -config e2e/config-e2e-stub.yaml`（stub 會回顯 model，證明送出的 slug 正確）
-- **M3 校準 harness**：完成，rubric 定版 **v1.0** — `./jev-proxy.exe calibrate --set tests --rubric v1.0 [--json out.json]`，30 筆案例走的是生產同一條管線（`BuildState` → Jev → 門檻）。2026-09-19 共跑 4 輪，品質閘門穩定全過：error recall 11/12（91.7%）、乾淨樣本 L0 誤報 0/18、Spearman 0.65–0.69、safety 種子 2/2；單輪總成本 < $0.002、約 10 秒。認證報告：`tests/calibration-v1.0.json`
-- 演進路線（model cascade / escalation）依規劃文件屬於後續階段，尚未實作
+- **M2 評分上線**：完成 — Jev adapter（TypeSafe + OpenRouter）、rubric、queue/worker、加權分、/v1/scores、skipped/error 事件；真實 OpenRouter e2e 通過（`status: ok`，weighted 與 API 彙總交叉吻合）
+- **M3 校準 harness**：完成，rubric 定版 **v1.0** — 30 筆案例走生產同一條管線；4 輪品質閘門穩定全過（recall 11/12、誤報 0/18、Spearman 0.65–0.69、safety 2/2）。認證報告：`tests/calibration-v1.0.json`
+- **gateway 多供應商路由**（2026-09-19 新增）：providers/routes/default 解析、key 注入、provider 前綴命名空間、`GET /v1/models` 合併清單、可選客戶端門鎖；legacy passthrough 保留為相容模式
+- **M4 觀測與行動** / **cascade**：未開始（見規劃文件演進路線）
 
 ## 快速開始
 
 ```sh
-# 建置（工具鏈在 ../go/bin/go.exe；或用系統 PATH 的 go）
-go build -o jev-proxy.exe ./cmd/jev-proxy
+go build -o jev-proxy.exe ./cmd/jev-proxy        # 工具鏈在 ../go/bin/go.exe
 
-# 放金鑰：把 .env.example 複製成 .env、填真值（.env 已在 .gitignore）
-cp .env.example .env      # 然後編輯 OPENROUTER_API_KEY=...
-# 或走環境變數（環境優先於 .env，可臨時覆寫）：
-#   OPENROUTER_API_KEY=...   provider: openrouter
-#   TYPESAFE_API_KEY=...     provider: typesafe
-
-# 跑起來（啟動會自動載入 ./.env；-env 可換路徑）
-./jev-proxy.exe -config config.yaml
+cp .env.example .env     # 填入各家 key：OPENROUTER/DEEPSEEK/NOUS/JEV_CLIENT_KEY...
+./jev-proxy.exe -config config.yaml              # 自動載入 ./.env（-env 可換路徑）
 ```
 
-把客戶端（Hermes / ZCode / 任何 OpenAI SDK）的 `base_url` 指向 `http://localhost:8080/v1` 即可。主流程零修改、串流零延遲。
+Agent 端：`base_url` 指向 `http://localhost:8080/v1`，`Authorization` 填 `JEV_CLIENT_KEY` 的值（若啟用了門鎖；沒啟用就隨意填），`model` 從 `GET /v1/models` 的清單裡挑——名字自帶 provider 命名空間，選誰就是誰。
+
+## 多供應商路由（gateway）
+
+### 解析優先序（先命中先贏）
+
+1. **`routes` 名稱表** — 對**完整模型名**做 glob（`*` 跨 `/`）的有序規則，可用 `model:` 做轉發改名。這是逃生門與捷徑（例：`{ match: "deepseek-chat", provider: deepseek }`）
+2. **provider 前綴** — 第一段等於已註冊的 provider 名 → 轉發給它並**剝掉前綴**：`nous/deepseek/deepseek-r1` → Nous 收到 `deepseek/deepseek-r1`；`openrouter/deepseek/deepseek-chat-v3` → OpenRouter 收到 `deepseek/deepseek-chat-v3`（只剝第一段，內部斜線原樣保留）
+3. **`default`** — 全不命中時兜底（範例為 openrouter，幾乎什麼都收）
+
+### Nous / OpenRouter 同 ID 碰撞怎麼解
+
+兩家大量模型 ID 相同（`deepseek/deepseek-chat-v3`、`meta-llama/llama-3.1-405b`…）。**解法是命名空間成為一級公民**：`GET /v1/models` 回的是**合併＋前綴化**的清單（`alpha/gpt-4o`、`nous/gpt-4o`…），agent 從清單選模型時，選的名字本身已經唯一決定了 provider。手打模型名才需要注意：`deepseek/...` 若剛好被同名 provider 搶走，想給 OpenRouter 就明寫 `openrouter/deepseek/...`（或加一條 route 規則蓋掉）。
+
+### 金鑰流
+
+- provider key 只存在 `.env`（→ 環境變數），**只在转發瞬间注入对应请求**，client 傳來的 Authorization 一律被蓋掉
+- 客戶端從頭到尾看不到任何 provider key；proxy 掛了就是網路掛了，不留憑證
+- `JEV_CLIENT_KEY` 有值＝啟用門鎖：`/v1/*` 都要帶它（常數時間比對），防止本機其他程式或區網白嫖金庫；預設 `listen: 127.0.0.1:8080` 只綁本機
+- 某家 key 沒填：開機警告、其他家照常、打到那家才報錯（缺哪些會印在啟動日誌）
 
 ## 行為
 
@@ -39,29 +51,34 @@ cp .env.example .env      # 然後編輯 OPENROUTER_API_KEY=...
 |------|------|
 | 串流回覆（預設） | 位元組原樣轉發；`data: [DONE]` 後組出全文，非同步評分，分數只進 JSONL 與查詢 API |
 | 非串流回覆 | 同步評分後再回應（加 0.1–0.5s），附 `X-Jev-Weighted` / `X-Jev-Safety` / `X-Jev-Confidence`，低分再加 `X-Jev-Flag: review` |
+| gateway：模型解析 | 命中規則／前綴／default；前綴命中時轉發體改寫（Content-Length 同步）；回應附 `X-Jev-Provider` |
+| gateway：模型名無解（沒設 default 時） | 400 `jev_proxy_route_error`，計入 `route_error_total` |
+| 門鎖啟用且 key 不符 | 401（`/v1/*` 一律；`/healthz`、`/metrics` 不驗） |
 | 純 tool-call 輪（content 空） | 不評分，計入 `no_content_total` |
 | 串流沒等到 `[DONE]` / 中斷 | 記 `skipped` 事件（`stream_no_done` / `stream_interrupted`） |
 | 評分佇列滿 | 丟棄評分，記 `skipped`（`queue_full`）；永不擋主流程 |
 | Jev 呼叫失敗 | 記 `error` 事件（weighted 為 null）；429/529 指數退避重試 |
 
-兩種模式都會附 `X-Jev-Request-Id`（proxy 生成的 UUID，查分的 key）。
+每種模式都會附 `X-Jev-Request-Id`（proxy 生成的 UUID，查分的 key）。
 
 ## 端點
 
-- `POST /v1/chat/completions` — 純 passthrough + 非同步評分
+- `POST /v1/chat/completions` — 路由（gateway）或直通（legacy）＋評分
+- `GET /v1/models` — gateway：合併各家清單，`id` 帶 `provider/` 命名空間、另附 `jev_provider`；某家抓取失敗跳過並在 `X-Jev-Models-Partial` 列出；快取 5 分鐘
 - `GET /v1/scores/{response_id}` — 取該回覆的評分事件
-- `GET /metrics` — 計數器、Jev 延遲分位（p50/p95）、加權分分佈（`score_level_l0..l3_total`）
+- `GET /metrics` — 計數器（含 `route_error_total`、`provider_requests_<name>_total`）、Jev 延遲 p50/p95、加權分分佈 `score_level_l0..l3_total`
 - `GET /healthz`
 
 ## 評分事件（scores-YYYY-MM.jsonl）
 
 ```json
 {
-  "ts": "2026-09-18T21:50:00+08:00",
+  "ts": "2026-09-19T21:50:00+08:00",
   "response_id": "<X-Jev-Request-Id>",
+  "provider": "nous",              // gateway 路由結果（legacy 無此欄）
   "upstream_id": "chatcmpl-…",
   "upstream_model": "gpt-…",
-  "rubric_version": "v1",
+  "rubric_version": "v1.0",
   "jev_model": "typesafe/jev-1.13-…",
   "weighted": 2.37,            // proxy 由四級機率算出：Σ p(Li)×i
   "api_score": 2.4,            // Jev 自帶的彙總分，留作交叉檢查
@@ -85,7 +102,17 @@ Jev API 實測 schema（2026-09-18，`typesafe/jev-1.13-20260917`）：score 型
 
 ## 設定
 
-見 `config.yaml` 內註解（非密鑰設定）。金鑰類放本地 `.env`（範本 `.env.example`、載入器 `internal/dotenv`）：啟動依序找 `-env` 指定路徑 → `./.env` → config 同目錄；**shell 已設的環境變數蓋過檔案值**。`.env` 與 `scores-*.jsonl`（內含完整回覆）都已被 `.gitignore` 排除。熱參數（改檔重啟即生效）：`sample_rate`、`context_turns`、三個門檻、`min_confidence`、queue 容量。
+見 `config.yaml` 內註解（非密鑰設定）。金鑰類放本地 `.env`（範本 `.env.example`、載入器 `internal/dotenv`）：啟動依序找 `-env` 指定路徑 → `./.env` → config 同目錄；**shell 已設的環境變數蓋過檔案值**。`.env` 與 `scores-*.jsonl`（內含完整回覆）都已被 `.gitignore` 排除。熱參數（改檔重啟即生效）：路由表、provider 端點、`sample_rate`、`context_turns`、三個門檻、`min_confidence`、queue 容量。
+
+### E2E（全免 key）
+
+```sh
+# legacy stub：python e2e/fake_upstream.py 9911; python e2e/fake_jev.py 9912
+#   ./jev-proxy.exe -config e2e/config-e2e-stub.yaml          # :8082
+# gateway：python e2e/fake_upstream.py 9911; python e2e/fake_upstream.py 9912; python e2e/fake_jev.py 9913
+#   E2E_ALPHA_KEY=.. E2E_BETA_KEY=.. E2E_CLIENT_KEY=sk-test OPENROUTER_API_KEY=.. \
+#   ./jev-proxy.exe -config e2e/config-e2e-gateway.yaml       # :8083
+```
 
 ## 校準（M3）
 
@@ -106,3 +133,4 @@ Jev API 實測 schema（2026-09-18，`typesafe/jev-1.13-20260917`）：score 型
 - judge 只依 state（對話上下文 + 回覆）判定，抓不到與上下文無關的外部事實錯誤——這是一致性評審，不是事實查核
 - 串流模式的分數無法回填 header（HTTP header 先於 body 送出），只能走 JSONL 與查詢 API
 - 非同步評分在 proxy 重啟時，佇列內未評事件會丟失（分數是遙測，不是交易）
+- gateway 金庫：`/v1/models` 依賴各家清單端點可用（失敗只降級該家）；未設 `JEV_CLIENT_KEY` 時同機任何程式可用你的 key——預設只綁 127.0.0.1 是本機信任邊界，跨機使用請務必開門鎖並自行處理傳輸安全

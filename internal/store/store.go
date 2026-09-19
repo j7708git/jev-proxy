@@ -17,6 +17,7 @@ import (
 type Event struct {
 	TS            time.Time   `json:"ts"`
 	ResponseID    string      `json:"response_id"`
+	Provider      string      `json:"provider,omitempty"` // gateway routing decision
 	UpstreamID    string      `json:"upstream_id,omitempty"`
 	UpstreamModel string      `json:"upstream_model,omitempty"`
 	RubricVersion string      `json:"rubric_version"`

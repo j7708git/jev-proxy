@@ -5,6 +5,7 @@ keyed by level index, noul for the safety answer) and echoes the requested
 model back, so the recorded event proves what the proxy actually sent.
 """
 import json
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
@@ -35,4 +36,5 @@ class H(BaseHTTPRequestHandler):
         pass
 
 
-HTTPServer(("127.0.0.1", 9912), H).serve_forever()
+port = int(sys.argv[1]) if len(sys.argv) > 1 else 9912
+HTTPServer(("127.0.0.1", port), H).serve_forever()

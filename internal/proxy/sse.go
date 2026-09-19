@@ -118,7 +118,7 @@ func (t *streamTracker) finish() {
 		}
 	}()
 
-	base := scorer.Job{ResponseID: t.info.RequestID, UpstreamModel: t.info.Model}
+	base := scorer.Job{ResponseID: t.info.RequestID, Provider: t.info.Provider, UpstreamModel: t.info.Model}
 	if !t.sawEOF {
 		t.h.scorer.RecordSkipped(base, "stream_interrupted")
 		return

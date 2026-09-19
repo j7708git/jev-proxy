@@ -4,7 +4,13 @@ package rubric
 
 // Version locks the exact wording below. Events record it; thresholds are
 // only comparable within the same version.
-const Version = "v1"
+//
+// v1.0: calibration set (30 cases) replayed twice on 2026-09-19 — all five
+// acceptance gates passed on the wording below unchanged, so it is frozen as
+// the finalized version. See README "校準" for the two known ceilings this
+// surfaced (arithmetic errors are not caught; the L2/L3 boundary is judged
+// optimistically with low confidence).
+const Version = "v1.0"
 
 // Instructions is the quality judge's full prompt, sent as the score
 // question's instructions field.

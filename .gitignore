@@ -9,3 +9,6 @@
 # runtime telemetry: contains full conversation replies; never commit
 scores.jsonl
 scores-*.jsonl
+
+# calibration scratch runs (the certified one, calibration-v1.0.json, is tracked)
+tests/report-*.json

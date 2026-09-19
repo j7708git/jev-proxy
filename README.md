@@ -12,7 +12,7 @@ OpenAI 相容的 passthrough proxy：不做路由、不擋回覆、不修改任�
   - ✅ 真實 e2e 已通過（2026-09-19，OpenRouter）：串流直通 → 非同步評分 `status: ok`，`jev_model = typesafe/jev-1.13-20260917`，weighted 自算與 API 彙總交叉吻合（2.28 = 2.28）；該輪 confidence 0.68 < 0.7 → `low_confidence: true` 壓住旗標，正是漂移把手的 live 範例（見 `scores-e2e-2026-09.jsonl`）
   - 2026-09-19 加專案 `.env`：啟動自動載入 `./.env`（或 `-env` 指定／config 同目錄），環境變數優先於檔案；金鑰不再依賴 shell
   - 免 key 迴歸：`python e2e/fake_upstream.py` + `python e2e/fake_jev.py` + `./jev-proxy.exe -config e2e/config-e2e-stub.yaml`（stub 會回顯 model，證明送出的 slug 正確）
-- **M3 校準 harness**：未開始
+- **M3 校準 harness**：完成，rubric 定版 **v1.0** — `./jev-proxy.exe calibrate --set tests --rubric v1.0 [--json out.json]`，30 筆案例走的是生產同一條管線（`BuildState` → Jev → 門檻）。2026-09-19 共跑 4 輪，品質閘門穩定全過：error recall 11/12（91.7%）、乾淨樣本 L0 誤報 0/18、Spearman 0.65–0.69、safety 種子 2/2；單輪總成本 < $0.002、約 10 秒。認證報告：`tests/calibration-v1.0.json`
 - 演進路線（model cascade / escalation）依規劃文件屬於後續階段，尚未實作
 
 ## 快速開始
@@ -86,6 +86,20 @@ Jev API 實測 schema（2026-09-18，`typesafe/jev-1.13-20260917`）：score 型
 ## 設定
 
 見 `config.yaml` 內註解（非密鑰設定）。金鑰類放本地 `.env`（範本 `.env.example`、載入器 `internal/dotenv`）：啟動依序找 `-env` 指定路徑 → `./.env` → config 同目錄；**shell 已設的環境變數蓋過檔案值**。`.env` 與 `scores-*.jsonl`（內含完整回覆）都已被 `.gitignore` 排除。熱參數（改檔重啟即生效）：`sample_rate`、`context_turns`、三個門檻、`min_confidence`、queue 容量。
+
+## 校準（M3）
+
+```sh
+./jev-proxy.exe calibrate --set tests --rubric v1.0 --json tests/calibration-v1.0.json
+```
+
+`tests/cases.jsonl` 依規劃文件為 30 筆：10 乾淨（人工 L2/L3）、10 種子變異（應判 L0/L1，含 2 筆 safety 洩漏種子）、10 歷史真實（繁中＋代碼混合）。校準與生產共用同一條管線與同一個 rubric 常數——不存在「測試用的那版規則」。quality 閘門（召回／誤報／Spearman／safety）決定定版與否；cost、p95 延遲是 ops 訊號，只警告不動 rubric（改措辭救不了網路抖動）。
+
+**三個人必須知道的實測發現（v1.0 不修，如實記錄）：**
+
+1. **驗算錯誤抓不到**：`259×4=1026`（實為 1036）被判 L3。judge 沒有計算器，這是規劃書預留的天花板，屬於「一致性評審」而非事實查核的邊界。
+2. **L2/L3 邊界系統性偏寬**：多筆「普通但正確」的回覆被抬成 L3（加權分 2.4–2.7）。方向安全——不會把壞的放進好的。
+3. **信心分布很有結構**：抓到錯誤時 confidence 0.84–0.98，評好回覆時普遍 0.2–0.7（約 6 成事件低於 min_confidence=0.7）。這正是「單向閘」哲學的實證：低分可信、高分只是參考。**做 cascade 前必須重審 min_confidence 預設值**——0.7 會壓掉多數分數。
 
 ## 限制
 

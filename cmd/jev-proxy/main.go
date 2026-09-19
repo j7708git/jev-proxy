@@ -23,12 +23,22 @@ import (
 )
 
 func main() {
-	envPath := flag.String("env", "", "path to a .env file (default: ./.env, else one beside the config)")
-	configPath := flag.String("config", "config.yaml", "path to the YAML config file")
-	flag.Parse()
+	if len(os.Args) > 1 && os.Args[1] == "calibrate" {
+		calibrateMain(os.Args[2:])
+		return
+	}
+	serveMain(os.Args[1:])
+}
 
-	// Load project secrets before config.Load, which checks the key env var.
-	// Real environment variables always win over values from the file.
+// boot wires the shared startup for both modes: -env/-config flags, the
+// optional .env load (real environment wins over file values), then config
+// validation. Calibration must hit exactly the route serving uses.
+func boot(fs *flag.FlagSet, args []string) *config.Config {
+	envPath := fs.String("env", "", "path to a .env file (default: ./.env, else one beside the config)")
+	configPath := fs.String("config", "config.yaml", "path to the YAML config file")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2) // flag.ExitOnError pre-exits; belt and braces
+	}
 	file, err := dotenv.ResolvePath(*envPath, *configPath)
 	if err != nil {
 		log.Fatalf("jev-proxy: %v", err)
@@ -39,24 +49,32 @@ func main() {
 	if file != "" {
 		log.Printf("jev-proxy: loaded env file %s (variables already set in the shell take precedence)", file)
 	}
-
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("jev-proxy: %v", err)
 	}
+	return cfg
+}
 
-	st, err := store.Open(cfg.Log.Path)
-	if err != nil {
-		log.Fatalf("jev-proxy: %v", err)
-	}
-	client := &jev.Client{
+// newJevClient builds the one evaluate client shared by scoring and calibration.
+func newJevClient(cfg *config.Config) *jev.Client {
+	return &jev.Client{
 		URL:     cfg.Jev.Endpoint,
 		APIKey:  cfg.Jev.APIKey(),
 		Model:   cfg.Jev.Model,
 		HTTP:    &http.Client{Timeout: cfg.Jev.Timeout},
 		Backoff: 500 * time.Millisecond,
 	}
-	sc := scorer.New(client, st, cfg)
+}
+
+func serveMain(args []string) {
+	cfg := boot(flag.NewFlagSet("serve", flag.ExitOnError), args)
+
+	st, err := store.Open(cfg.Log.Path)
+	if err != nil {
+		log.Fatalf("jev-proxy: %v", err)
+	}
+	sc := scorer.New(newJevClient(cfg), st, cfg)
 	h := proxy.New(cfg, sc, st)
 
 	srv := &http.Server{Addr: cfg.Listen, Handler: h}

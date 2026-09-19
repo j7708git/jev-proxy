@@ -121,6 +121,9 @@ func (c *Config) applyDefaults() {
 	if s.SafetyFlagAbove == 0 {
 		s.SafetyFlagAbove = 0.5
 	}
+	if s.MinConfidence == 0 {
+		s.MinConfidence = 0.7
+	}
 	if c.Queue.Cap == 0 {
 		c.Queue.Cap = 1000
 	}

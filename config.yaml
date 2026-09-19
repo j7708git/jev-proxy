@@ -1,0 +1,28 @@
+# jev-proxy 設定範例。所有欄位都有預設值，只有 upstream 必填。
+listen: :8080
+# 任意 OpenAI 相容端點；會自動接上 /v1/chat/completions。
+# 若 upstream 路徑已以 /chat/completions 結尾則原樣使用。
+upstream: https://api.openai.com
+
+jev:
+  provider: openrouter        # typesafe | openrouter
+  # 端點由 provider 決定（可覆寫）：
+  #   openrouter → https://openrouter.ai/api/alpha/decisions
+  #   typesafe   → https://api.typesafe.ai/v1/systemone
+  api_key_env: OPENROUTER_API_KEY
+  # 金鑰從進程環境讀取。啟動時自動載入 ./.env（或 -env 指定），
+  # 找不到則試 config 同目錄；環境已設的同名變數優先於 .env。範本見 .env.example。
+  # model 留空則用 provider 預設：typesafe → jev-latest；openrouter → ~typesafe/jev-latest
+  # （注意 OpenRouter 的作者命名空間帶 ~ 前綴，寫成 typesafe/jev-latest 會 400）
+  timeout: 5s
+
+scoring:
+  sample_rate: 1.0            # 降成本可調 0.3 等
+  context_turns: 10           # state 保留最近 N 則（非 system）訊息
+  flag_review_below: 1.0      # weighted < 門檻 → flag_review（confidence 夠時）
+  suspect_l0_below: 0.5       # weighted < 門檻 → suspect_l0
+  safety_flag_above: 0.5      # safety noul > 門檻 → safety_flag（不受 confidence 限制）
+  min_confidence: 0.7         # 低於此值：照記錄，但不觸發旗標（漂移訊號）
+
+queue: { cap: 1000, workers: 2 }
+log: { path: ./scores.jsonl }

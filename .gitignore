@@ -1,0 +1,11 @@
+# local secrets — keep .env out of version control (.env.example is the tracked template)
+.env
+*.env
+!.env.example
+
+# build artifact
+/jev-proxy.exe
+
+# runtime telemetry: contains full conversation replies; never commit
+scores.jsonl
+scores-*.jsonl

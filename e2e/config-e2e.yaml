@@ -1,0 +1,13 @@
+# 端到端測試用：假 upstream + 真 Jev（OpenRouter）
+listen: :8081
+upstream: http://127.0.0.1:9911
+jev:
+  provider: openrouter
+  api_key_env: OPENROUTER_API_KEY
+  timeout: 20s
+scoring:
+  sample_rate: 1.0
+  context_turns: 10
+  min_confidence: 0.7
+queue: { cap: 100, workers: 1 }
+log: { path: ./scores-e2e.jsonl }

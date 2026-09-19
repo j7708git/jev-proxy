@@ -1,0 +1,15 @@
+# Keyless e2e: fake upstream + fake Jev (stubs on :9911/:9912).
+# Verifies the whole binary wiring end-to-end without API credentials.
+listen: :8082
+upstream: http://127.0.0.1:9911
+jev:
+  provider: openrouter
+  endpoint: http://127.0.0.1:9912   # override → no real API call
+  api_key_env: OPENROUTER_API_KEY   # dummy value only has to exist
+  timeout: 10s
+scoring:
+  sample_rate: 1.0
+  context_turns: 10
+  min_confidence: 0.7
+queue: { cap: 100, workers: 1 }
+log: { path: ./scores-e2e-stub.jsonl }
